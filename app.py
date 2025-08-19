@@ -1,6 +1,10 @@
 import streamlit as st
 from bao_game import BaoGame
 from minimax_ai import MinimaxAI
+import torch
+from neural_net import BaoNet, board_to_tensor, load_model
+from mcts import MCTS
+from coach import Coach
 
 # Initialize game state
 if 'game' not in st.session_state:
@@ -9,9 +13,11 @@ if 'game' not in st.session_state:
     st.session_state.status = ""
     st.session_state.move_history = []
     st.session_state.last_move = None
+    st.session_state.coach = Coach(lambda: BaoGame(), device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
 
 game = st.session_state.game
 ai = st.session_state.ai
+coach = st.session_state.coach
 
 st.set_page_config(page_title="Bao Game AI", layout="wide")
 st.title("🕹️ Bao Game - Play vs Strategic AI")
@@ -75,3 +81,30 @@ with st.sidebar:
         st.session_state.move_history = []
         st.session_state.last_move = None
         st.experimental_rerun()
+
+# Training controls
+st.sidebar.header("⚙️ Training")
+if st.sidebar.button("▶️ Run one self-play game"):
+    with st.spinner("Running self-play..."):
+        examples = coach.self_play_and_fill(n_games=1, n_simulations=50)
+        st.sidebar.success("Self-play finished and added to replay buffer.")
+
+if st.sidebar.button("🧠 Train one epoch"):
+    with st.spinner("Training..."):
+        coach.train(epochs=1, batch_size=32)
+        st.sidebar.success("Training epoch completed.")
+
+# MCTS visualization
+st.sidebar.header("🔎 MCTS")
+if st.sidebar.button("Run MCTS for current position"):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    net = coach.net
+    mcts = MCTS(lambda: BaoGame(), net, n_simulations=200, device=device)
+    policy, root = mcts.run(game)
+    import numpy as np
+    heat = (policy * 100).astype(int)
+    st.markdown("### MCTS visit distribution (policy)")
+    for r in range(game.rows):
+        cols = st.columns(game.cols)
+        for c in range(game.cols):
+            cols[c].markdown(f"**{heat[r,c]}**")
