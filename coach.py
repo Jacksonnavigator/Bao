@@ -4,6 +4,8 @@ from torch.utils.tensorboard import SummaryWriter
 from neural_net import BaoNet, board_to_tensor, save_model, load_model
 from replay_buffer import ReplayBuffer
 from self_play import self_play_game
+from mcts import MCTS
+import numpy as np
 import os
 
 class Coach:
@@ -65,3 +67,72 @@ class Coach:
         # final save
         save_model(self.net, os.path.join(self.checkpoint_dir, 'best_model.pth'))
         print('Training finished and model saved.')
+
+    def play_game_between(self, net1, net2, n_simulations=100):
+        """Play one game between net1 (player 1) and net2 (player 2) using MCTS-guided play.
+        Returns winner (1 or 2).
+        """
+        game = self.game_factory()
+        while not game.is_game_over():
+            current = game.current_player
+            # choose the network for the current player
+            net = net1 if current == 1 else net2
+            mcts = MCTS(self.game_factory, net, n_simulations=n_simulations, device=self.device)
+            policy, root = mcts.run(game)
+            flat = policy.flatten()
+            move_idx = int(np.argmax(flat))
+            r = move_idx // game.cols
+            c = move_idx % game.cols
+            game.make_move(r, c)
+        winner = 3 - game.current_player
+        return winner
+
+    def evaluate_challenger(self, challenger_net, n_games=20, n_simulations=100, win_threshold=0.55):
+        """Evaluate challenger_net against the current incumbent (if any).
+        If challenger win rate > win_threshold, promote and save as best model.
+        Returns True if promoted.
+        """
+        incumbent_path = os.path.join(self.checkpoint_dir, 'best_model.pth')
+        incumbent = None
+        if os.path.exists(incumbent_path):
+            incumbent = BaoNet().to(self.device)
+            load_model(incumbent, incumbent_path, device=self.device)
+
+        # If no incumbent, promote challenger immediately
+        if incumbent is None:
+            save_model(challenger_net, incumbent_path)
+            print('No incumbent found — promoted challenger to best_model.pth')
+            return True
+
+        challenger_wins = 0
+        incumbent_wins = 0
+
+        for i in range(n_games):
+            # alternate which network plays as player 1
+            if i % 2 == 0:
+                p1, p2 = challenger_net, incumbent
+                winner = self.play_game_between(p1, p2, n_simulations=n_simulations)
+                if winner == 1:
+                    challenger_wins += 1
+                else:
+                    incumbent_wins += 1
+            else:
+                p1, p2 = incumbent, challenger_net
+                winner = self.play_game_between(p1, p2, n_simulations=n_simulations)
+                # if winner==2 challenger was player2
+                if winner == 2:
+                    challenger_wins += 1
+                else:
+                    incumbent_wins += 1
+
+        win_rate = challenger_wins / float(n_games)
+        self.writer.add_scalar('evaluation/challenger_win_rate', win_rate, self.train_step)
+        print(f'Challenger wins: {challenger_wins}, Incumbent wins: {incumbent_wins}, win_rate={win_rate:.3f}')
+
+        if win_rate > win_threshold:
+            save_model(challenger_net, incumbent_path)
+            print('Challenger promoted to incumbent.')
+            return True
+        else:
+            print('Challenger not promoted.')
+            return False
